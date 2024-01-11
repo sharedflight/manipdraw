@@ -55,7 +55,7 @@ FILE(GLOB LIBRAIN_SRCS ${LIBRAIN}/src/obj8.c)
 FILE(GLOB LIBRAIN_HDRS ${LIBRAIN}/src/obj8.h ${LIBRAIN}/src/glpriv.h)
 
 set(ALL_SRC
-    manipdraw.c
+    manipdraw.cpp
     ${LIBRAIN_SRCS}
     ${LIBRAIN_HDRS})
 LIST(SORT ALL_SRC)

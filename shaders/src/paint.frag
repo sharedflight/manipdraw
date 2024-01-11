@@ -23,11 +23,11 @@
 
 #version 460
 
-layout(location = 10) uniform float	alpha;
+layout(location = 10) uniform vec4 color;
 layout(location = 0) out vec4		color_out;
 
 void
 main()
 {
-	color_out = vec4(1, 0, 1, alpha * 0.35);
+	color_out = vec4(color.r, color.g, color.b, color.a * 0.35);
 }

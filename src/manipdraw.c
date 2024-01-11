@@ -26,9 +26,11 @@
 
 #include <XPLMDisplay.h>
 #include <XPLMPlugin.h>
+#include <XPLMPlanes.h>
 
 #include <cglm/cglm.h>
 
+#include <acfutils/acf_file.h>
 #include <acfutils/crc64.h>
 #include <acfutils/dr.h>
 #include <acfutils/glew.h>
@@ -39,9 +41,85 @@
 
 #include <obj8.h>
 
+#include <vector>
+#include <string>
+
 #define	PLUGIN_NAME		"manipdraw"
 #define	PLUGIN_SIG		"skiselkov.manipdraw"
 #define	PLUGIN_DESCRIPTION	"manipdraw"
+
+typedef struct _manip_click {
+	uint16_t index;
+	uint64_t start_t; 
+} manip_click ;
+
+
+
+/* obj8_t structure...
+
+	
+	n_manips (count of manipulators)
+	manips (array of obj8_manip_t objects)
+
+		manip type type
+
+
+		cmdname
+
+		inside union 
+
+			manip_axis_knob
+			struct {
+				float		min, max;
+				float		d_click, d_hold;
+				dr_t		dr;
+			} manip_axis_knob;
+
+
+			XPLMCommandRef		cmd;
+
+			struct {
+				vect3_t		d;
+				XPLMCommandRef	pos_cmd;
+				XPLMCommandRef	neg_cmd;
+			} cmd_axis;
+			struct {
+				XPLMCommandRef	pos_cmd;
+				XPLMCommandRef	neg_cmd;
+			} cmd_knob;
+			struct {
+				XPLMCommandRef	pos_cmd;
+				XPLMCommandRef	neg_cmd;
+			} cmd_sw;
+			struct {
+				float		dx, dy, dz;
+				float		v1, v2;
+				unsigned	drset_idx;
+			} drag_axis;
+			struct {
+				vect3_t		xyz;
+				vect3_t		dir;
+				float		angle1, angle2;
+				float		lift;
+				float		v1min, v1max;
+				float		v2min, v2max;
+				unsigned	drset_idx1, drset_idx2;
+			} drag_rot;
+			struct {
+				float		dx, dy;
+				float		v1min, v1max;
+				float		v2min, v2max;
+				unsigned	drset_idx1, drset_idx2;
+			} drag_xy;
+			struct {
+				unsigned	drset_idx;
+				float		v1, v2;
+			} toggle;
+*/
+
+
+static std::vector<manip_click> manip_clicks;
+
 
 static struct {
 	dr_t	fbo;
@@ -83,14 +161,16 @@ static shader_obj_t	resolve_shader = {};
 static shader_obj_t	paint_shader = {};
 static obj8_t		*obj = NULL;
 
+unsigned int indexToPaint = -1u;
+
 enum {
     U_PVM,
-    U_ALPHA,
+    U_COLOR,
     NUM_UNIFORMS
 };
 static const char *uniforms[NUM_UNIFORMS] = {
     [U_PVM] = "pvm",
-    [U_ALPHA] = "alpha"
+    [U_COLOR] = "color"
 };
 
 static void
@@ -110,6 +190,22 @@ resolve_manip_complete(void)
 		/* single pixel containing the clickspot index */
 		manip_idx = *data;
 		glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+
+		if (manip_idx != UINT16_MAX && manip_idx != prev_manip_idx) {
+
+			logMsg("New manip idx is %d", manip_idx);
+
+			prev_manip_idx = manip_idx;
+
+			uint64_t now = microclock();
+	
+			manip_click click;
+			click.index = manip_idx;
+			click.start_t = now;
+
+			manip_clicks.push_back(click);
+
+		}
 	}
 	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
 	cursor_xfer = false;
@@ -176,20 +272,91 @@ resolve_manip(int mouse_x, int mouse_y, const mat4 pvm)
 	glViewport(vp[0], vp[1], vp[2], vp[3]);
 }
 
+
+unsigned int countup = 0;
+
+unsigned int todraw = 0;
+
 static void
 paint_manip(const mat4 pvm)
 {
 	uint64_t now = microclock(), delta_t = 0;
 	int vp[4];
 	float alpha;
+	mat4 pvm_in;
+
+	memcpy(pvm_in, pvm, sizeof (pvm));
 
 	ASSERT(pvm != NULL);
 
 	VERIFY3S(dr_getvi(&drs.viewport, vp, 0, 4), ==, 4);
 
+	alpha = 0.5;
+
+	countup++;
+	unsigned int newtodraw = (countup / 2) % 200;
+
+	if (newtodraw != todraw) {
+		logMsg("[DEBUG] Now drawing by counter %d", newtodraw);
+		todraw = newtodraw;
+	}
+
+
+	shader_obj_bind(&paint_shader);
+	glUniformMatrix4fv(shader_obj_get_u(&paint_shader, U_PVM),
+						1, GL_FALSE, (const GLfloat *)pvm);
+
+	glUniform4f(shader_obj_get_u(&paint_shader, U_COLOR), 1, 0, 0, alpha);
+	
+	ASSERT(obj != NULL);
+	glEnable(GL_BLEND);
+
+	//obj8_set_render_mode2(obj, OBJ8_RENDER_MODE_MANIP_ONLY_ONE, todraw);
+	
+	//obj8_draw_group(obj, NULL, shader_obj_get_prog(&paint_shader), pvm);
+
+
+	//obj8_set_render_mode2(obj, OBJ8_RENDER_MODE_NONMANIP_ONLY_ONE, todraw);
+	
+	//obj8_draw_group(obj, NULL, shader_obj_get_prog(&paint_shader), pvm);
+
+
+	//glUniform4f(shader_obj_get_u(&paint_shader, U_COLOR), 0, 1, 0, alpha);
+	
+	logMsg("[DEBUG] Painting cmd idx of %d", indexToPaint);
+
+	obj8_set_render_mode2(obj, OBJ8_RENDER_MODE_NONMANIP_ONLY_ONE, indexToPaint);
+	
+	//obj8_draw_group(obj, NULL, shader_obj_get_prog(&paint_shader), pvm);
+
+	obj8_draw_group_by_cmdidx(obj, indexToPaint, shader_obj_get_prog(&paint_shader), pvm);
+
+	// obj8_set_render_mode2(obj, OBJ8_RENDER_MODE_MANIP_ONLY, 0);
+
+
+	// alpha = 0.5;
+
+	// shader_obj_bind(&paint_shader);
+	// glUniformMatrix4fv(shader_obj_get_u(&paint_shader, U_PVM),
+	// 					1, GL_FALSE, (const GLfloat *)pvm);
+
+	// glUniform4f(shader_obj_get_u(&paint_shader, U_COLOR), 1, 0, 1, alpha);
+	
+	// ASSERT(obj != NULL);
+	// glEnable(GL_BLEND);
+	
+	// obj8_draw_by_counter(obj, shader_obj_get_prog(&paint_shader), todraw, pvm_in);
+
+
+	glViewport(vp[0], vp[1], vp[2], vp[3]);
+
+	last_draw_t = now;
+
+	/*
 	if (manip_idx != prev_manip_idx || now - last_draw_t > SEC2USEC(0.2)) {
 		blink_start_t = now;
 		prev_manip_idx = manip_idx;
+		logMsg("New manip idx is %d", manip_idx);
 	}
 	last_draw_t = now;
 	delta_t = (now - blink_start_t) % 1000000;
@@ -198,16 +365,14 @@ paint_manip(const mat4 pvm)
 	else
 		alpha = 1 - (delta_t - 500000) / 500000.0;
 
-	shader_obj_bind(&paint_shader);
-	glUniformMatrix4fv(shader_obj_get_u(&paint_shader, U_PVM),
-	    1, GL_FALSE, (const GLfloat *)pvm);
-	glUniform1f(shader_obj_get_u(&paint_shader, U_ALPHA), alpha);
-	ASSERT(obj != NULL);
-	glEnable(GL_BLEND);
 	obj8_set_render_mode2(obj, OBJ8_RENDER_MODE_MANIP_ONLY_ONE, manip_idx);
 	obj8_draw_group(obj, NULL, shader_obj_get_prog(&paint_shader), pvm);
 
-	glViewport(vp[0], vp[1], vp[2], vp[3]);
+	obj8_set_render_mode2(obj, OBJ8_RENDER_MODE_MANIP_ONLY_ONE, 86);
+	obj8_draw_group(obj, NULL, shader_obj_get_prog(&paint_shader), pvm);
+	*/
+
+	
 }
 
 static bool
@@ -253,8 +418,9 @@ draw_cb(XPLMDrawingPhase phase, int before, void *refcon)
 
 	UNUSED(resolve_manip);
 	resolve_manip(mouse_x, mouse_y, pvm);
-	if (should_draw_manip(manip_idx))
-		paint_manip(pvm);
+	//if (true || should_draw_manip(manip_idx))
+	paint_manip(pvm);
+	
 	glUseProgram(0);
 
 	return (1);
@@ -396,9 +562,15 @@ XPluginStop(void)
 	log_fini();
 }
 
+static inline const char *acf_find_prop(const acf_file_t *acf, const std::string property)
+{
+	return acf_prop_find(acf, property.c_str());
+}
+
 PLUGIN_API int
 XPluginEnable(void)
 {
+
 	char *shader_dir, *obj_path;
 
 	fdr_find(&drs.fbo, "sim/graphics/view/current_gl_fbo");
@@ -412,29 +584,226 @@ XPluginEnable(void)
 	    "sim/graphics/view/using_modern_driver")) {
 		ASSERT3S(xpver, >=, 12000);
 	}
-	VERIFY(XPLMRegisterDrawCallback(draw_cb, xplm_Phase_Window, 1, NULL));
-
+	
 	create_cursor_objects();
 
 	shader_dir = mkpathname(plugindir, "shaders", NULL);
+
+	logMsg("[DEBUG] Will init shaders from path: %s", shader_dir);
+
 	if (!shader_obj_init(&resolve_shader, shader_dir, &resolve_prog_info,
 	    NULL, 0, uniforms, NUM_UNIFORMS) ||
 	    !shader_obj_init(&paint_shader, shader_dir, &paint_prog_info,
 	    NULL, 0, uniforms, NUM_UNIFORMS)) {
-		goto errout;
+		
+		lacf_free(shader_dir);
+		return (0);
 	}
-	obj_path = mkpathname(plugindir, "..", "..", "objects",
-	    "CL650_cockpit.obj", NULL);
-	obj = obj8_parse(obj_path, ZERO_VECT3);
-	lacf_free(obj_path);
-	if (obj == NULL)
-		goto errout;
 
-	lacf_free(shader_dir);
 	return (1);
-errout:
-	lacf_free(shader_dir);
-	return (0);
+}
+
+
+void new_aircraft_loaded()
+{
+	
+	VERIFY(XPLMRegisterDrawCallback(draw_cb, xplm_Phase_Window, 1, NULL));
+
+
+	vect3_t pos_offset = ZERO_VECT3; // moves to right, moves ?, moves back
+
+	std::string _aircraftFolderPath;
+
+    static char aircraftPath[2048];
+    static char aircraftFileName[1024];
+
+    XPLMGetNthAircraftModel(0, aircraftFileName, aircraftPath); 
+
+    std::string _aircraftFilePath = aircraftPath;
+
+   	_aircraftFolderPath = aircraftPath;
+    std::string key(aircraftFileName);
+
+    std::size_t found = _aircraftFolderPath.rfind(key);
+    if (found!=std::string::npos) {
+        _aircraftFolderPath.replace(found,key.length(),"");
+    } else {
+    	assert(false);
+    }
+
+	acf_file_t *acf = acf_file_read(_aircraftFilePath.c_str());
+    
+    bool desired_object_found = false;
+
+	std::string objectFileName = "knobs.obj";
+
+	std::string _aircraftObjectPath;
+
+
+    if(acf) {
+
+	    const char *obj_in_acf = NULL;
+
+	    unsigned int idx = 0;
+
+
+	    while(obj_in_acf = acf_find_prop(acf, "_obja/" + std::to_string(idx) + "/_v10_att_file_stl")) {
+
+	    	std::string obj_in_acf_str = std::string(obj_in_acf);
+
+	    	std::size_t found = obj_in_acf_str.find(objectFileName);
+
+	        if (found != std::string::npos) {
+	        	desired_object_found = true;
+
+	        	_aircraftObjectPath = _aircraftFolderPath + "/objects/" + obj_in_acf;
+	            
+	            logMsg("[DEBUG] Found cockpit object at: %s", _aircraftObjectPath.c_str());
+
+	            const char *x_acf_prt = acf_find_prop(acf, "_obja/" + std::to_string(idx) + "/_v10_att_x_acf_prt_ref");
+		        const char *y_acf_prt = acf_find_prop(acf, "_obja/" + std::to_string(idx) + "/_v10_att_y_acf_prt_ref");
+		        const char *z_acf_prt = acf_find_prop(acf, "_obja/" + std::to_string(idx) + "/_v10_att_z_acf_prt_ref");
+
+		        if (x_acf_prt) {
+		        	pos_offset.x = std::stof(x_acf_prt) / 3.2808398950131;
+		        }
+		        if (y_acf_prt) {
+		        	pos_offset.y = std::stof(y_acf_prt) / 3.2808398950131;
+		        }
+		        if (z_acf_prt) {
+		        	pos_offset.z = std::stof(z_acf_prt) / 3.2808398950131;
+		        }
+		        
+	        	break;
+	        }
+
+	        idx++;
+	    }
+
+   		acf_file_free(acf);
+
+   	}
+
+   	if (!desired_object_found) {
+   		assert(false);
+   		return;
+   	}
+   	
+	obj = obj8_parse(_aircraftObjectPath.c_str(), pos_offset);
+
+	if (!obj) {
+		assert(false);
+		return;
+	}
+
+	while (obj8_is_load_complete(obj) == false) {
+
+	}
+
+
+	logMsg("Report on obj cmds found...");
+
+	unsigned n_cmd_t = obj8_get_num_cmd_t(obj);
+
+	for (unsigned i = 0; i < n_cmd_t; i++) {
+
+		const obj8_cmd_t *cmd = obj8_get_cmd_t(obj, i);
+
+		const obj8_drset_t *dr_set_for_obj = obj8_get_drset(obj);
+
+		unsigned drset_idx = obj8_get_cmd_drset_idx(cmd);
+
+		unsigned cmd_idx = obj8_get_cmd_idx(cmd);
+
+		const char *dr_name_for_cmd = obj8_drset_get_dr_name(dr_set_for_obj, drset_idx);
+
+		obj8_debug_cmd(obj, cmd);
+
+		logMsg("Found cmdidx %d has drset idx of %d for %s", cmd_idx, drset_idx, dr_name_for_cmd);
+
+		if (strcmp(dr_name_for_cmd, "ckpt/pushbutton/39") == 0) {
+			logMsg("[DEBUG] FOUND INDEX TO PAINT OF %d", i);
+			indexToPaint = i;
+
+			logMsg("[DEBUG] Will look for nearest tris...");
+
+			unsigned tris_cmd_idx = obj8_nearest_tris_for_cmd(obj, cmd);
+
+			logMsg("[DEBUG] Found tris cmdidx %d", tris_cmd_idx);
+
+			indexToPaint = tris_cmd_idx;
+		}
+
+	}
+
+	logMsg("Found %d manipulators for object", obj8_get_num_manips(obj));
+
+	/* Lets print info from the parsed object... */
+
+	for (unsigned i = 0 ; i < obj8_get_num_manips(obj); i++) {
+
+		/*
+
+		obj->drset[i]
+
+		obj8_drset_get_dr_name(obj->drset, cmd->drset_idx)
+
+		typedef struct {
+			unsigned	n_drs;
+			avl_tree_t	tree;
+			list_t		list;
+			bool		complete;
+			float		*values;
+		} obj8_drset_t;
+			*/
+
+		const obj8_manip_t* obj_manip = obj8_get_manip(obj, i);
+
+		switch(obj_manip->type) {
+
+			case OBJ8_MANIP_AXIS_KNOB:
+				logMsg("For manip at index %d of type OBJ8_MANIP_AXIS_KNOB the relevent dr is %s",i, obj_manip->manip_axis_knob.dr.name);
+				break;
+			case OBJ8_MANIP_COMMAND:
+				logMsg("For manip at index %d of type OBJ8_MANIP_COMMAND the relevent cmd ref is stored in obj_manip->cmd", i);
+				break;
+			case OBJ8_MANIP_COMMAND_AXIS:
+				logMsg("For manip at index %d of type OBJ8_MANIP_COMMAND_AXIS the relevent cmd refs are pos_cmd and neg_com is stored in obj_manip->cmd_axis.pos_cmd and obj_manip->cmd_axis.neg_cmd", i);
+				break;
+			case OBJ8_MANIP_COMMAND_KNOB:
+				logMsg("For manip at index %d of type OBJ8_MANIP_COMMAND_KNOB the relevent cmd refs are pos_cmd and neg_com is stored in obj_manip->cmd_knob.pos_cmd and obj_manip->cmd_knob.neg_cmd", i);
+				break;
+			case OBJ8_MANIP_COMMAND_SWITCH_LR:
+				logMsg("For manip at index %d of type OBJ8_MANIP_COMMAND_SWITCH_LR the relevent cmd refs are pos_cmd and neg_com is stored in obj_manip->cmd_sw.pos_cmd and obj_manip->cmd_sw.neg_cmd", i);
+				break;
+			case OBJ8_MANIP_COMMAND_SWITCH_UD:
+				logMsg("For manip at index %d of type OBJ8_MANIP_COMMAND_SWITCH_UD the relevent cmd refs are pos_cmd and neg_com is stored in obj_manip->cmd_sw.pos_cmd and obj_manip->cmd_sw.neg_cmd", i);
+				break;
+			case OBJ8_MANIP_COMMAND_SWITCH_LR2:
+				logMsg("For manip at index %d of type OBJ8_MANIP_COMMAND_SWITCH_LR2 the relevent cmd ref is stored in obj_manip->cmd_sw2", i);
+				break;
+			case OBJ8_MANIP_COMMAND_SWITCH_UD2:
+				logMsg("For manip at index %d of type OBJ8_MANIP_COMMAND_SWITCH_UD2 the relevent cmd ref is stored in obj_manip->cmd_sw2", i);
+				break;
+			case OBJ8_MANIP_DRAG_AXIS:
+				logMsg("For manip at index %d of type OBJ8_MANIP_DRAG_AXIS the relevent dr is %s", i, obj8_drset_get_dr_name(obj8_get_drset(obj), obj_manip->drag_axis.drset_idx));
+				break;
+			case OBJ8_MANIP_DRAG_ROTATE:
+				logMsg("For manip at index %d of type OBJ8_MANIP_DRAG_ROTATE the relevent dr's are %s AND %s", i, obj8_drset_get_dr_name(obj8_get_drset(obj), obj_manip->drag_rot.drset_idx1), obj8_drset_get_dr_name(obj8_get_drset(obj), obj_manip->drag_rot.drset_idx2));
+				break;
+			case OBJ8_MANIP_DRAG_XY:
+				logMsg("For manip at index %d of type OBJ8_MANIP_DRAG_XY the relevent dr's are %s AND %s", i, obj8_drset_get_dr_name(obj8_get_drset(obj), obj_manip->drag_xy.drset_idx1), obj8_drset_get_dr_name(obj8_get_drset(obj), obj_manip->drag_xy.drset_idx2));
+				break;
+			case OBJ8_MANIP_TOGGLE:
+				logMsg("For manip at index %d of type OBJ8_MANIP_TOGGLE the relevent dr is %s", i, obj8_drset_get_dr_name(obj8_get_drset(obj), obj_manip->toggle.drset_idx));
+				break;
+			case OBJ8_MANIP_NOOP:
+				logMsg("For manip type of OBJ8_MANIP_NOOP no relevent dr or cmd");
+				break;
+			default:
+				break;
+		}
+	}
 }
 
 PLUGIN_API void
@@ -451,10 +820,46 @@ XPluginDisable(void)
 	}
 }
 
-PLUGIN_API void
-XPluginReceiveMessage(XPLMPluginID from, int msg, void *param)
+
+PLUGIN_API void XPluginReceiveMessage(
+XPLMPluginID	inFromWho,
+int				inMessage,
+void *			inParam)
 {
-	UNUSED(from);
-	UNUSED(msg);
-	UNUSED(param);
+    
+    //Here we will
+    
+    //PRINTF("C Plugin received message.\n");
+    
+    /*
+    int sfd_msg_rcv_val = SF_MSG_RCV;
+    
+    if (inMessage == sfd_msg_rcv_val) {
+        
+        SASL_MSG_StringData messageData = *((SASL_MSG_StringData *)inParam);
+        
+		SFFlightClientController::getInstance().handle_message_from_ui(messageData.mData);
+    }*/
+
+    switch (inMessage) {
+
+    	case XPLM_MSG_PLANE_CRASHED:
+    		/* This message is sent to your plugin whenever the user's plane crashes.      */
+
+    		break;
+
+    	case XPLM_MSG_PLANE_LOADED:
+    		/* This message is sent to your plugin whenever a new plane is loaded.  The    *
+			 * parameter is the number of the plane being loaded; 0 indicates the user's   *
+			 * plane.                                                                      */
+    		
+    		//NOTE: This is an absurd aspect of the XPLM that a void* is actually an int!
+    		if (inParam == 0) {
+    			//logMsg("Aircraft loaded...");
+    			new_aircraft_loaded();
+    		}
+
+    	default:
+    		break;
+    }
 }
